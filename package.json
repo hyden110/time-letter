@@ -1,0 +1,16 @@
+{
+  "name": "timeletter",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "test:integration": "pnpm --filter @timeletter/api run test:integration",
+    "migrate": "pnpm --filter @timeletter/api run migrate",
+    "verify": "pnpm run build && pnpm run typecheck && pnpm run test",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down"
+  }
+}
