@@ -3,6 +3,7 @@ import { CurrentAdmin } from '../common/current-identity.decorator';
 import { LettersService } from '../letters/letters.service';
 import { ModerationService } from './moderation.service';
 import { FreezeLetterDto, ResolveModerationDto } from './moderation.dto';
+import { toQueueItem, type ModerationQueueItem } from './moderation.view';
 
 @Controller('admin/moderation')
 export class ModerationController {
@@ -11,24 +12,17 @@ export class ModerationController {
     @Inject(LettersService) private readonly lettersService: LettersService,
   ) {}
 
-  /** 人工审核队列：审核记录 + 信笺内容 + 命中原因 */
+  /**
+   * 人工审核队列：审核记录 + 信笺内容 + 命中原因。
+   * 命中片段在此处按解密后的正文重算（数据库里的审核记录只存 {rule, category, index}）。
+   */
   @Get('queue')
-  async queue(@CurrentAdmin() _adminId: string) {
+  async queue(@CurrentAdmin() _adminId: string): Promise<ModerationQueueItem[]> {
     const pending = await this.moderationService.listQueue();
     return Promise.all(
-      pending.map(async (record) => {
-        const letter = await this.lettersService.getByIdInternal(record.letterId);
-        return {
-          record,
-          letter: {
-            id: letter.id,
-            userId: letter.userId,
-            status: letter.status,
-            content: letter.content,
-            deliveryDate: letter.deliveryDate,
-          },
-        };
-      }),
+      pending.map(async (record) =>
+        toQueueItem(record, await this.lettersService.getByIdInternal(record.letterId)),
+      ),
     );
   }
 

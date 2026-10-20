@@ -34,15 +34,18 @@ describe('ModerationService（US-024 自动审核）', () => {
     expect(await service.listQueue()).toHaveLength(0);
   });
 
-  it('命中敏感词时进入待人工审核队列，携带命中原因', async () => {
-    const outcome = await service.reviewLetter('letter_2', {
-      text: '这是一封劝人赌博的信',
-      images: [],
-    });
+  it('命中敏感词时进入待人工审核队列，命中明细只带位置不带正文', async () => {
+    const text = '这是一封劝人赌博的信';
+    const outcome = await service.reviewLetter('letter_2', { text, images: [] });
     expect(outcome.autoPassed).toBe(false);
     expect(outcome.record.decision).toBe('pending_human_review');
-    expect(outcome.record.hits[0]?.rule).toBe('赌博');
-    expect(outcome.record.hits[0]?.snippet).toContain('赌博');
+    expect(outcome.record.hits[0]).toEqual({
+      rule: '赌博',
+      category: 'sensitive_word',
+      index: text.indexOf('赌博'),
+    });
+    // US-009：审核记录整体落库，序列化后不得出现正文上下文
+    expect(JSON.stringify(outcome.record)).not.toContain('劝人');
     expect(outcome.record.providerResults).toEqual([{ provider: 'composite', passed: false }]);
     const queue = await service.listQueue();
     expect(queue.map((r) => r.letterId)).toEqual(['letter_2']);

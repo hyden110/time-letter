@@ -1,12 +1,16 @@
 import type { ModerationDecision } from '@timeletter/shared';
 
+/**
+ * 自动审核命中明细（会被整体序列化落库，因此**不得包含信件正文明文**）。
+ * 展示用的命中片段在管理端读取时由已解密正文按 index 重算，见 moderation.view.ts。
+ */
 export interface ModerationHit {
   /** 命中的规则/词条来源，例如敏感词库词条或微信 API 返回的 label */
   rule: string;
-  /** 命中片段（用于人工审核展示命中原因） */
-  snippet: string;
   /** 命中分类，例如 'sensitive_word' | 'wechat_sec_check' */
   category: string;
+  /** 命中位置（正文字符下标，从 0 开始）：US-009 只落位置，不落正文明文 */
+  index: number;
 }
 
 export interface ModerationRecord {
@@ -34,7 +38,7 @@ export interface ModerationRepository {
   update(id: string, patch: Partial<ModerationRecord>): Promise<ModerationRecord | null>;
 }
 
-/** 开发期内存实现；PostgreSQL 适配器 Sprint 1.2 接入（接口保持不变） */
+/** 开发期/单测内存实现；PostgreSQL 适配器见 persistence/pg/pg-moderation.repository.ts（同语义） */
 export class InMemoryModerationRepository implements ModerationRepository {
   private readonly store = new Map<string, ModerationRecord>();
 

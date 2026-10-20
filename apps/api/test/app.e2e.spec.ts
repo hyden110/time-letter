@@ -171,6 +171,8 @@ describe('端到端：payment_enabled=false（默认，不收款托管）', () =
       .expect(200);
     const item = queue.body.find((entry: { letter: { id: string } }) => entry.letter.id === letterId);
     expect(item.record.hits[0].rule).toBe('赌博');
+    // 命中片段改为读取时按已解密正文重算：管理端审核上下文不回退
+    expect(item.record.hits[0].snippet).toBe('这封信在讲赌博的故事');
 
     await agent
       .post(`/admin/moderation/records/${item.record.id}/resolve`)

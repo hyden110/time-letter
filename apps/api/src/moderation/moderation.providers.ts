@@ -33,11 +33,9 @@ export class SensitiveWordProvider implements ContentModerationProvider {
     for (const word of this.words) {
       const index = text.indexOf(word);
       if (index >= 0) {
-        hits.push({
-          rule: word,
-          snippet: text.slice(Math.max(0, index - 5), index + word.length + 5),
-          category: 'sensitive_word',
-        });
+        // 只记词条与位置：命中明细会整体落库（jsonb），不得携带正文明文（US-009）。
+        // 人工审核要看的上下文片段由 moderation.view.ts 在读取时按已解密正文重算。
+        hits.push({ rule: word, category: 'sensitive_word', index });
       }
     }
     return { provider: this.name, passed: hits.length === 0, hits };

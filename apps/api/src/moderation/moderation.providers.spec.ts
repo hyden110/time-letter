@@ -6,17 +6,20 @@ import {
 } from './moderation.providers';
 
 describe('内容审核通道', () => {
-  it('敏感词库命中时返回词条与前后各 5 字片段', () => {
+  it('敏感词库命中时只返回词条、分类与位置，不返回正文片段', () => {
     const provider = new SensitiveWordProvider(['赌博']);
-    const result = provider.check('前言部分：我们来谈谈赌博这种行为的危害');
+    const text = '前言部分：我们来谈谈赌博这种行为的危害';
+    const result = provider.check(text);
     expect(result.passed).toBe(false);
     expect(result.hits).toEqual([
       {
         rule: '赌博',
-        snippet: '我们来谈谈赌博这种行为的',
         category: 'sensitive_word',
+        index: text.indexOf('赌博'),
       },
     ]);
+    // US-009：命中明细会整体落库，序列化后不得出现正文上下文
+    expect(JSON.stringify(result.hits)).not.toContain('我们来谈谈');
   });
 
   it('敏感词库未命中时通过', () => {

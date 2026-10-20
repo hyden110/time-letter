@@ -39,7 +39,7 @@ export LETTER_ENCRYPTION_KEY=$(openssl rand -hex 32) # 32 字节：64 位 hex �
 pnpm run migrate                                    # 建表 + 索引（幂等）
 pnpm run build && node apps/api/dist/main.js        # 以 PG 模式启动
 curl -i http://localhost:3000/health                # {"status":"ok","paymentEnabled":false,"storage":"postgres"}
-pnpm run test:integration                           # 真 PG 全链路 + 唯一索引 + 密文落库
+pnpm run test:integration                           # 真 PG 全链路 + 唯一索引 + 密文落库 + 五表全表明文扫描
 ```
 
 环境变量注入：`apps/api` 不自动读取 `.env`（未引入 dotenv）。本地用 `export` 或命令前缀，云上用 systemd/pm2/容器环境注入或 KMS；若确实需要 `.env` 自动加载，Node ≥ 20.6 的 `node --env-file=.env` 与引入 dotenv 二选一，避免出现两套配置来源。
@@ -74,6 +74,7 @@ pnpm run test:integration                           # 真 PG 全链路 + 唯一�
 | 视觉层（小程序 / 管理后台页面） | ⏸ 待设计稿冻结 |
 | PostgreSQL 仓储适配 + 迁移脚本 + 真库集成测试（`pnpm run test:integration`） | ✅ |
 | US-009 信件正文静态加密（AES-256-GCM，密钥来自环境变量、启动即校验） | ✅ |
+| US-009 审核明细不落正文明文（只存 rule/category/index，片段读取时重算） | ✅ |
 | US-009 保管编号唯一索引兜底 + 冲突重试 + 号段用尽终态 | ✅ |
 | US-014 H5 一次性 token / 投递引擎与邮件实发 / Redis 队列消费 / 支付接入 | ⏸ 后续切片 |
 
@@ -90,4 +91,5 @@ pnpm run test:integration                           # 真 PG 全链路 + 唯一�
 - **SQL 安全**：全部参数化 `$n` 占位符；动态 `UPDATE` 走白名单构造器 `apps/api/src/persistence/pg/pg-update.ts`，非白名单字段显式抛错，禁止字符串拼接。
 - **保管编号唯一性**：由数据库部分唯一索引 `letters_custody_code_key`（`WHERE custody_code IS NOT NULL`）兜底，服务层捕获唯一冲突后换号重试（上限 8 次），号段用尽返回可重试错误；内存实现同语义，便于单测覆盖。
 - **静态加密（US-009）**：信件正文由服务层用 AES-256-GCM 加密后入库，`letters.content` 只存密文信封 `{v,alg,iv,tag,ct}`；密钥取自环境变量 `LETTER_ENCRYPTION_KEY`，启动即校验，禁止硬编码、禁止明文写日志。换密钥会导致既有密文不可解，正式环境由 KMS 注入并妥善备份。
+- **派生数据同样不落明文**：内容审核明细 `moderation_records.hits` 只存 `{rule, category, index}`（命中词条、分类、正文位置），不存正文片段；管理端审核队列在**读取时**用已解密正文按 `index` 重算命中上下文（`apps/api/src/moderation/moderation.view.ts`），片段只出现在响应里、不写回数据库。集成测试对 `letters/recipients/consents/moderation_records/orders` 五张表做整行 `::text` 全表扫描，正文片段命中数必须为 0。
 - 收件人信息一期不做静态加密（仅信笺正文）；管理员操作审计日志、登录态在 Sprint 1.3 接入；Redis 队列消费、投递引擎与 H5 一次性 token 在后续切片接入。

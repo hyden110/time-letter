@@ -15,7 +15,7 @@ import { PgModerationRepository } from '../../src/persistence/pg/pg-moderation.r
 import { PgOrderRepository } from '../../src/persistence/pg/pg-order.repository';
 import type { RecipientRepository } from '../../src/recipients/recipients.repository';
 import type { ConsentRepository } from '../../src/consent/consent.repository';
-import type { ModerationRepository } from '../../src/moderation/moderation.repository';
+import type { ModerationHit, ModerationRepository } from '../../src/moderation/moderation.repository';
 import type { OrderRepository } from '../../src/orders/orders.repository';
 
 type Agent = ReturnType<typeof request>;
@@ -138,6 +138,28 @@ async function readRawContent(letterId: string): Promise<EncryptedEnvelope> {
   expect(result.rows).toHaveLength(1);
   expect(result.rows[0].alg).toBe('aes-256-gcm');
   return result.rows[0].content;
+}
+
+/** 明文扫描覆盖的业务表（表名只来自这里的代码常量，探针值一律走 $1 参数化） */
+const BUSINESS_TABLES = ['letters', 'recipients', 'consents', 'moderation_records', 'orders'];
+
+/**
+ * 全表明文扫描：逐表把整行转成 ::text 再 LIKE 探针，返回命中行数 >0 的表。
+ * 只扫单表单行会漏掉派生数据（例如审核明细里的正文片段），因此这里扫全部 5 张业务表的全部列。
+ */
+async function scanPlaintext(probe: string): Promise<Record<string, number>> {
+  const leaked: Record<string, number> = {};
+  for (const table of BUSINESS_TABLES) {
+    const result = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ${table} WHERE ${table}::text LIKE $1`,
+      [`%${probe}%`],
+    );
+    const matched = result.rows[0]?.n ?? 0;
+    if (matched > 0) {
+      leaked[table] = matched;
+    }
+  }
+  return leaked;
 }
 
 beforeAll(async () => {
@@ -333,6 +355,27 @@ describe('信件正文静态加密落库（US-009）', () => {
     expect(JSON.stringify(dump.rows[0])).not.toContain('未来的你');
   });
 
+  it('5 张业务表全表扫描：正文片段在任何表的任何列都不出现', async () => {
+    // 命中敏感词的信写入 moderation_records，正常信写入 orders：派生表也要有数据才谈得上扫描
+    await submitFlaggedLetter('pg_leak_1', FLAGGED_TEXT);
+    await grantConsent('pg_leak_2', 'privacy_policy');
+    await grantConsent('pg_leak_2', 'user_agreement');
+    const cleanLetter = await createReadyLetter('pg_leak_2', PLAINTEXT);
+    await agent
+      .post(`/letters/${cleanLetter}/submit`)
+      .set('x-user-id', 'pg_leak_2')
+      .expect(201);
+
+    for (const table of BUSINESS_TABLES) {
+      const filled = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
+      expect(filled.rows[0].n, `${table} 应当有数据，否则扫描是空转`).toBeGreaterThan(0);
+    }
+    // 探针带前后文：裸词「赌博」本身就是审核明细的 rule 字段，落库属于预期
+    for (const probe of [FLAGGED_TEXT, '在讲赌博的故事', PLAINTEXT, '走真实 PostgreSQL 的信']) {
+      expect(await scanPlaintext(probe)).toEqual({});
+    }
+  });
+
   it('服务层用同一把密钥可解密回原文，接口返回明文正文', async () => {
     const userId = 'pg_u6';
     const letterId = await createReadyLetter(userId, PLAINTEXT);
@@ -357,7 +400,7 @@ describe('信件正文静态加密落库（US-009）', () => {
 });
 
 describe('内容审核与人工裁决（PG 仓储）', () => {
-  it('命中敏感词 → 待人工审核：不落订单，审核明细以 jsonb 存库', async () => {
+  it('命中敏感词 → 待人工审核：不落订单，审核明细只存位置不存正文', async () => {
     const userId = 'pg_u8';
     const { letterId } = await submitFlaggedLetter(userId, FLAGGED_TEXT);
 
@@ -366,16 +409,26 @@ describe('内容审核与人工裁决（PG 仓储）', () => {
     });
     const queue = await agent.get('/admin/moderation/queue').set('x-admin-id', 'admin_1').expect(200);
     const item = queue.body.find((entry: { letter: { id: string } }) => entry.letter.id === letterId);
-    expect(item.record.hits[0].rule).toBe('赌博');
-    // 审核队列给管理员看的是解密后的明文正文
+    // 审核上下文在读取时按已解密正文重算，管理端功能不回退
+    expect(item.record.hits[0]).toEqual({
+      rule: '赌博',
+      category: 'sensitive_word',
+      index: FLAGGED_TEXT.indexOf('赌博'),
+      snippet: FLAGGED_TEXT,
+    });
     expect(item.letter.content.text).toBe(FLAGGED_TEXT);
 
-    const row = await db.query<{ decision: string; hits: unknown }>(
+    const row = await db.query<{ decision: string; hits: ModerationHit[] }>(
       'SELECT decision, hits FROM moderation_records WHERE letter_id = $1',
       [letterId],
     );
     expect(row.rows[0].decision).toBe('pending_human_review');
-    expect(row.rows[0].hits).toMatchObject([{ rule: '赌博' }]);
+    // 落库形态（US-009）：只有 rule/category/index，没有 snippet，也不含正文上下文
+    expect(row.rows[0].hits).toEqual([
+      { rule: '赌博', category: 'sensitive_word', index: FLAGGED_TEXT.indexOf('赌博') },
+    ]);
+    expect(JSON.stringify(row.rows[0].hits)).not.toContain('snippet');
+    expect(JSON.stringify(row.rows[0].hits)).not.toContain('在讲');
   });
 
   it('人工驳回 → 修改重提 → 保管中 → 抽检冻结', async () => {
@@ -491,7 +544,7 @@ describe('PG 仓储适配往返（recipients / consents / moderation / orders）
       id: 'mod_pg_1',
       letterId: 'letter_pg_1',
       decision: 'pending_human_review',
-      hits: [{ rule: '赌博', snippet: '赌博', category: 'sensitive_word' }],
+      hits: [{ rule: '赌博', category: 'sensitive_word', index: 5 }],
       providerResults: [{ provider: 'sensitive_word', passed: false }],
       reviewerId: null,
       reason: null,
@@ -500,7 +553,7 @@ describe('PG 仓储适配往返（recipients / consents / moderation / orders）
     });
     expect(await repository.findByLetterId('letter_pg_1')).toMatchObject({
       decision: 'pending_human_review',
-      hits: [{ rule: '赌博', snippet: '赌博', category: 'sensitive_word' }],
+      hits: [{ rule: '赌博', category: 'sensitive_word', index: 5 }],
       providerResults: [{ provider: 'sensitive_word', passed: false }],
     });
     expect(await repository.listByDecision('pending_human_review')).toHaveLength(1);
